@@ -25,7 +25,7 @@ kappa = 1.0;            % pN*um^2
 alpha = 0.3;            % pN/um
 beta = 0.5;             % pN/um
 Ma = 4.0;               % pN/um^3
-A0 = 50.24;             % um^2
+A0 = 133.5;             % um^2
 epsilon = 1.0;          % um
 tau = 2.62;             % pN*s/um^2
 
@@ -49,7 +49,7 @@ y = linspace(0, (Ny-1)*dy, Ny);
 phi = zeros(Ny, Nx);
 cx = round(Nx/2);              % center in x
 cy = round(0.15 * Ny);        
-radius = 3.5;                  
+radius = 6.52;                  
 phi(((X - x(cx)).^2 + (Y - y(cy)).^2) < radius^2) = 1;
 
 phi_prev=phi;
@@ -60,27 +60,59 @@ phi_old = phi;
 
 psi = zeros(Ny, Nx);
 
-% Wall location and slit parameters
-wall_y_start = round(0.33 * Ny);    % top of the wall
-wall_y_end   = round(0.5  * Ny);    % bottom of the wall
-slit_width   = round(0.8 * radius / dy);  % narrower than cell
-x_center     = round(Nx / 2);
-half_slit    = round(slit_width / 2);
+% Parameters (all in microns)
+circle_radius = 3.0;       % radius of each wall circle
+gap_size = 3.0;            % µm gap between circles
+wall_thickness = 0.5;      % width of tanh transition zone
 
-% Initialize psi as zeros
-psi = zeros(Ny, Nx);
+% Center coordinates (index space)
+cx = round(Nx/2);
+cy = round(Ny/2);
 
-% Set full wall block first
-psi(wall_y_start:wall_y_end, :) = 1;
+% Derived vertical offsets
+gap_distance = 2 * circle_radius + gap_size;
+center_offset = gap_distance / 2;
 
-% Carve out vertical slit in the middle
-psi(wall_y_start:wall_y_end, ...
-    x_center - half_slit : x_center + half_slit) = 0;
+% Convert X and Y to µm coordinates (if not already)
+[X_um, Y_um] = meshgrid(x, y);
+% Parameters (µm)
+circle_radius   = 3.0;       % µm
+gap_size        = 3.0;       % µm between circle edges
+wall_thickness  = 0.5;       % µm tanh transition zone
+
+% Center coordinates (index space)
+cy = round(Ny / 2);
+cx = round(Nx / 2);
+
+% Derived horizontal center-to-center distance
+gap_distance = 2 * circle_radius + gap_size;
+center_offset = gap_distance / 2;
+
+% Convert to µm coordinates
+[X_um, Y_um] = meshgrid(x, y);
+
+% Horizontal circle centers (in µm)
+x_left  = x(cx) - center_offset;
+x_right = x(cx) + center_offset;
+y_center = y(cy);
+
+% Distance fields from each center
+r_left  = sqrt((X_um - x_left).^2  + (Y_um - y_center).^2);
+r_right = sqrt((X_um - x_right).^2 + (Y_um - y_center).^2);
+
+% Smooth tanh profiles for each wall circle
+psi_left  = 0.5 * (1 - tanh((r_left  - circle_radius) / wall_thickness));
+psi_right = 0.5 * (1 - tanh((r_right - circle_radius) / wall_thickness));
+
+% Combine into psi field
+psi = psi_left + psi_right;
+psi(psi > 1) = 1;  % clip to avoid values > 1
 
 
+figure; imagesc(psi); axis equal tight; colorbar;
+title('\psi (tanh walls)');
 
-% Cut the slit out of the wall
-psi(wall_y:end, x_center - slit_width : x_center + slit_width) = 0;
+
 % Initialize V and W inside the cell only
 V = 1.1 * phi;
 bias = 0.4;
