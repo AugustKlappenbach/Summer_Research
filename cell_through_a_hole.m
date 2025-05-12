@@ -1,19 +1,22 @@
 % Full Phase Field Model with Reaction-Diffusion Coupling
 % Parameters from the table
-Nx = 200; Ny = 250;
+Nx = 200; Ny = 500;
 dx = 0.1; dy = 0.1;
 %dt = 1e-4/8; Old dt. For bending
+cy_cell = round(0.15 * Ny);        
+cx_cell = round(Nx/2);
 
 
 
-dt = 1e-3;
+dt = 1e-4/8;
 nSteps = 48000000;
 % Define the full output path
 output_dir = 'C:/Users/zackk/OneDrive/Desktop/Research/With bending results';
-save_interval = round(2 / dt); 
+save_interval = round(1 / dt); 
 
 % Make sure the directory exists
 if ~exist(output_dir, 'dir')
+
     mkdir(output_dir);
 end
 
@@ -39,35 +42,34 @@ DW = 0.0764;            % um^2/s
 lambda_wall = 10;  % strength of penalty
 
 
-
 % Spatial grid
 x = linspace(0, (Nx-1)*dx, Nx);
 y = linspace(0, (Ny-1)*dy, Ny);
-[X, Y] = meshgrid(x, y);
+[X, Y] = meshgrid(x, y); 
 
-% Initial phase field: circle of radius 4 um
-phi = zeros(Ny, Nx);
-cx = round(Nx/2);              % center in x
+% Smooth tanh initial phase field (soft circle)
+cx = round(Nx/2);              
 cy = round(0.15 * Ny);        
 radius = 6.52;                  
-phi(((X - x(cx)).^2 + (Y - y(cy)).^2) < radius^2) = 1;
+transition_width = 0.5;  % adjust this for sharpness/smoothness
 
-phi_prev=phi;
-phi = phi + 0.01 * randn(size(phi));
-phi(phi < 0) = 0;
-phi(phi > 1) = 1;
-phi_old = phi;
+r = sqrt((X - x(cx_cell)).^2 + (Y - y(cy_cell)).^2);
+phi = 0.5 * (1 - tanh((r - radius) / transition_width));
+figure;
+imagesc(phi, [0 1]); axis equal tight; colorbar;
+title('Initial φ before GPU');
 
-psi = zeros(Ny, Nx);
+phi_prev = phi;
+
 
 % Parameters (all in microns)
 circle_radius = 3.0;       % radius of each wall circle
 gap_size = 3.0;            % µm gap between circles
-wall_thickness = 0.5;      % width of tanh transition zone
+wall_thickness = 0.1;      % width of tanh transition zone
 
 % Center coordinates (index space)
-cx = round(Nx/2);
-cy = round(Ny/2);
+centerx = round(Nx/2);
+centery = round(Ny/2);
 
 % Derived vertical offsets
 gap_distance = 2 * circle_radius + gap_size;
@@ -76,13 +78,9 @@ center_offset = gap_distance / 2;
 % Convert X and Y to µm coordinates (if not already)
 [X_um, Y_um] = meshgrid(x, y);
 % Parameters (µm)
-circle_radius   = 3.0;       % µm
+circle_radius   = 13.5;       % µm 
 gap_size        = 3.0;       % µm between circle edges
-wall_thickness  = 0.5;       % µm tanh transition zone
-
-% Center coordinates (index space)
-cy = round(Ny / 2);
-cx = round(Nx / 2);
+wall_thickness  = 0.001;       % µm tanh transition zone
 
 % Derived horizontal center-to-center distance
 gap_distance = 2 * circle_radius + gap_size;
@@ -92,9 +90,9 @@ center_offset = gap_distance / 2;
 [X_um, Y_um] = meshgrid(x, y);
 
 % Horizontal circle centers (in µm)
-x_left  = x(cx) - center_offset;
-x_right = x(cx) + center_offset;
-y_center = y(cy);
+x_left  = x(centerx) - center_offset;
+x_right = x(centerx) + center_offset;
+y_center = y(centery);
 
 % Distance fields from each center
 r_left  = sqrt((X_um - x_left).^2  + (Y_um - y_center).^2);
@@ -117,7 +115,7 @@ title('\psi (tanh walls)');
 V = 1.1 * phi;
 bias = 0.4;
 V = V + bias * phi .* (Y > y(cy));  % adds rear-to-front polarity
-
+ 
 
 W = zeros(Ny, Nx);  % (200 x 600)
 W0 = 30;
@@ -128,17 +126,18 @@ rear_shape = W0 * exp(-((Y - y(cy) + 5).^2) / (2 * 3^2));
 % Apply to rear side of the cell only
 W = rear_shape .* phi .* (Y < y(cy));
 %GPU arrays:
-% phi = gpuArray(phi);
-% V = gpuArray(V);
-% W = gpuArray(W);
-% X = gpuArray(X);
-% Y = gpuArray(Y);
-% phi_prev = gpuArray(phi_prev);
+phi = gpuArray(phi);
+psi = gpuArray(psi);
+V = gpuArray(V);
+W = gpuArray(W);
+X = gpuArray(X);
+Y = gpuArray(Y);
+phi_prev = gpuArray(phi_prev);
 
 % Custom Laplacian function
 function lap = laplacian9(phi, dx, dy)
-    %kernel = gpuArray([1 4 1; 4 -20 4; 1 4 1]) / 6;
-    kernel =[1 4 1; 4 -20 4; 1 4 1] / 6;
+    kernel = gpuArray([1 4 1; 4 -20 4; 1 4 1]) / 6;
+    %kernel =[1 4 1; 4 -20 4; 1 4 1] / 6;
     lap = conv2(phi, kernel, 'same') / dx^2;
 end
 
@@ -155,6 +154,12 @@ fig = figure('Visible', 'on');
     imagesc(phi, [0 1]); axis equal tight; hold on;
     contour(psi, [0.5 0.5], 'k', 'LineWidth', 2);
     title('\phi with wall overlay'); colorbar;
+figure;
+imagesc(gather(V)); axis equal tight;
+title('Initial V polarity'); colorbar;
+figure;
+imagesc(gather(W)); axis equal tight;
+title('Initial W distribution'); colorbar;
 
 for step = 1:nSteps
     phi_old = phi;
@@ -163,13 +168,26 @@ for step = 1:nSteps
     tension = gamma * (lap_phi - G_prime(phi) / epsilon^2);
 
     % Volume conservation
-    A = sum(phi(:)) * dx * dy;
-    phi_smooth = imgaussfilt(phi, 1);
-    [dphix, dphiy] = gradient(phi_smooth, dx, dy);
-    grad_phi_mag = sqrt(dphix.^2 + dphiy.^2);
-    volume = -Ma * (A - A0) * grad_phi_mag;
+    if any(isnan(gather(phi(:))))
+    error("💀 φ is already NaN BEFORE volume term at step %d", step);
+end
 
-    % % Bending 
+    phi_clipped = min(max(phi, 0), 1);
+    [dphix, dphiy] = gradient(phi_clipped, dx, dy);
+    grad_phi_mag = sqrt(dphix.^2 + dphiy.^2 + 1e-12);
+    
+    A = sum(phi(:)) * dx * dy;
+    volume_force = -Ma * (A - A0);
+    volume_force = min(max(volume_force, -1e3), 1e3);  % hard clamp
+    
+    volume = volume_force * grad_phi_mag;
+    if any(isnan(gather(volume(:))))
+    error("💀 VOLUME still went NaN even after stabilizing!");
+    end
+
+
+
+    %% Bending 
     % biharm_phi = laplacian9(lap_phi, dx, dy);
     % lap_Gp = laplacian9(G_prime(phi), dx, dy);
     % Gpp = G_double_prime(phi);
@@ -178,7 +196,7 @@ for step = 1:nSteps
     % Reaction-Diffusion term
     reaction_diffusion = (alpha * V ) .* grad_phi_mag;
     %Penalty term:
-    penalty = -lambda_wall * psi; 
+    penalty = -lambda_wall * 3/2*(1-phi.^2).*psi; 
     % Update phi
     %dphi_dt = (tension + volume + reaction_diffusion + penalty + bending) / tau;
     dphi_dt = (tension + volume + reaction_diffusion + penalty ) / tau;
@@ -208,6 +226,10 @@ for step = 1:nSteps
 
     V(phi_old < 1e-3) = 0;
     W(phi_old < 1e-3) = 0;
+    if mod(step, 1000) == 0
+    fprintf("step %d | max(φ): %.4f | min(φ): %.4f\n", ...
+        step, max(gather(phi(:))), min(gather(phi(:))));
+    end
 
     % Track center of mass and area
     total_phi = sum(phi(:));
@@ -232,14 +254,16 @@ for step = 1:nSteps
     %40000 
  if mod(step, save_interval) == 0
     fig = figure('Visible', 'on');
-    imagesc(phi, [0 1]); axis equal tight; hold on;
+    imagesc(gather(phi), [0 1]); axis equal tight; hold on;
     
     % Overlay the wall as transparent mask
-    h = imagesc(psi);
-    set(h, 'AlphaData', 0.3 * (psi > 0));  % semi-transparent wall only where psi > 0
+    h = imagesc(gather(psi));
+    set(h, 'AlphaData', gather(0.3 * (psi > 0)));  % semi-transparent wall only where psi > 0
     colormap('parula');
     title('\phi with wall overlay'); colorbar;
     drawnow;
+
+
 end
 
 
